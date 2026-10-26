@@ -3,7 +3,12 @@
 Strict Assessment Rule:
 Absolutely NO LLM / AI API calls are made at runtime.
 All categorization decisions are made by transparent, deterministic heuristics with
-verifiable confidence scores and audit trail reasoning strings.
+bounded confidence scores and audit trail reasoning strings.
+
+Note on Confidence Scores:
+Confidence scores are deterministic heuristic weights [0.0 - 1.0] representing
+rule specificity and evidentiary clarity. They are NOT statistically calibrated
+probabilities from a machine learning model.
 """
 from typing import List, Tuple, Union
 from app.core.config import (
@@ -65,22 +70,34 @@ def categorize_transaction(tx: Union[ParsedTransaction, Transaction]) -> Categor
     """Categorize an individual transaction using deterministic heuristics.
     
     Evaluation Pipeline:
-    1. Client Revenue / Income Receipts (Money in matching recognized client patterns)
-    2. Inter-Account Transfers & Credit Card Payoffs (Non-deductible balance movements)
-    3. Refunds and Expense Offsets (Credits applied to original expense categories)
-    4. Unverified Credit Deposits (Money in without clear payer -> Needs Review)
-    5. Known Merchant Business Expenses (Money out matching tax category rules)
-    6. Unknown Merchants / Ambiguities (Routed to Needs Review with confidence 0.0)
+    1. Inflow Handling (Credits / Deposits):
+       a. Client Revenue (Matches recognized client invoicing/deposit patterns)
+       b. Inflow Transfers (e.g., Transfer from Savings)
+       c. Confirmed Refunds (Explicit refund/return indicator + merchant match -> offsets expense)
+       d. Ambiguous Refunds (Explicit refund indicator but unknown merchant -> Needs Review)
+       e. Vendor Credits without Refund Note (Unverified -> Needs Review; do not assume refund)
+       f. Unverified Credit Deposits (Unrecognized inflow -> Needs Review; do not assume income)
+
+    2. Outflow Handling (Debits / Expenses):
+       a. Inter-Account Transfers & Card Payoffs (Non-deductible balance movements)
+       b. Known Merchant Business Expenses (Matches tax category rules; autopay does not hijack)
+       c. Debit Refund Fees (Debits mentioning refund/return are fees, NOT incoming refunds)
+       d. Unknown Merchants / Ambiguities (Routed to Needs Review with confidence 0.0)
     """
     desc = tx.description.strip()
     tx_type = tx.type.strip().lower()
     amount = tx.amount
 
-    # -----------------------------------------------------------------------
-    # Stage 1: Client Revenue / Income (Money In with recognized client patterns)
-    # -----------------------------------------------------------------------
+    matched_cat, matched_kw = match_merchant(desc)
+    transfer_kw = match_transfer(desc)
+    refund_kw = match_refund(desc)
+    income_kw = match_income(desc)
+
+    # =======================================================================
+    # INFLOW HANDLING (Credits / Money Entering Account)
+    # =======================================================================
     if tx_type == "credit":
-        income_kw = match_income(desc)
+        # 1a. Client Revenue / Taxable Gross Income
         if income_kw:
             return CategorizedTransaction(
                 row_number=tx.row_number,
@@ -101,38 +118,70 @@ def categorize_transaction(tx: Union[ParsedTransaction, Transaction]) -> Categor
                 needs_review=False,
             )
 
-    # -----------------------------------------------------------------------
-    # Stage 2: Detect Inter-Account Transfers & Card Payments (Non-Deductible)
-    # -----------------------------------------------------------------------
-    transfer_kw = match_transfer(desc)
-    if transfer_kw:
-        return CategorizedTransaction(
-            row_number=tx.row_number,
-            id=tx.id,
-            date=tx.date,
-            description=tx.description,
-            amount=amount,
-            currency=tx.currency,
-            debit=tx.debit,
-            credit=tx.credit,
-            transaction_id=tx.transaction_id,
-            type=tx.type,
-            category=CATEGORY_TRANSFER,
-            is_refund=False,
-            is_transfer=True,
-            confidence=0.98,
-            reason=f"Matched transfer pattern '{transfer_kw}' (inter-account or debt payment)",
-            needs_review=False,
-        )
+        # 1b. Inflow Transfers (e.g. Online Transfer from Savings)
+        if transfer_kw and not matched_cat:
+            return CategorizedTransaction(
+                row_number=tx.row_number,
+                id=tx.id,
+                date=tx.date,
+                description=tx.description,
+                amount=amount,
+                currency=tx.currency,
+                debit=tx.debit,
+                credit=tx.credit,
+                transaction_id=tx.transaction_id,
+                type=tx.type,
+                category=CATEGORY_TRANSFER,
+                is_refund=False,
+                is_transfer=True,
+                confidence=0.98,
+                reason=f"Matched transfer pattern '{transfer_kw}' (inter-account transfer in)",
+                needs_review=False,
+            )
 
-    # -----------------------------------------------------------------------
-    # Stage 3: Detect Refunds & Expense Offsets
-    # -----------------------------------------------------------------------
-    refund_kw = match_refund(desc)
-    matched_cat, matched_kw = match_merchant(desc)
+        # 1c. Confirmed Refunds (Explicit refund/return indicator present)
+        if refund_kw:
+            if matched_cat:
+                return CategorizedTransaction(
+                    row_number=tx.row_number,
+                    id=tx.id,
+                    date=tx.date,
+                    description=tx.description,
+                    amount=amount,
+                    currency=tx.currency,
+                    debit=tx.debit,
+                    credit=tx.credit,
+                    transaction_id=tx.transaction_id,
+                    type=tx.type,
+                    category=matched_cat,
+                    is_refund=True,
+                    is_transfer=False,
+                    confidence=0.92,
+                    reason=f"Refund/return offset credited back to {matched_cat} (merchant '{matched_kw}')",
+                    needs_review=False,
+                )
+            else:
+                return CategorizedTransaction(
+                    row_number=tx.row_number,
+                    id=tx.id,
+                    date=tx.date,
+                    description=tx.description,
+                    amount=amount,
+                    currency=tx.currency,
+                    debit=tx.debit,
+                    credit=tx.credit,
+                    transaction_id=tx.transaction_id,
+                    type=tx.type,
+                    category=CATEGORY_NEEDS_REVIEW,
+                    is_refund=True,
+                    is_transfer=False,
+                    confidence=0.45,
+                    reason="Explicit refund indicator detected but original expense category is unknown",
+                    needs_review=True,
+                )
 
-    # A refund is indicated by explicit refund keywords OR a credit row matching an expense merchant
-    if refund_kw or (tx_type == "credit" and matched_cat):
+        # 1d. Vendor Credit WITHOUT explicit refund or income indicators
+        # Rule: Do not assume every credit from a known merchant is a refund.
         if matched_cat:
             return CategorizedTransaction(
                 row_number=tx.row_number,
@@ -145,38 +194,15 @@ def categorize_transaction(tx: Union[ParsedTransaction, Transaction]) -> Categor
                 credit=tx.credit,
                 transaction_id=tx.transaction_id,
                 type=tx.type,
-                category=matched_cat,
-                is_refund=True,
-                is_transfer=False,
-                confidence=0.92,
-                reason=f"Refund/reversal offset credited back to {matched_cat} (merchant '{matched_kw}')",
-                needs_review=False,
-            )
-        else:
-            # Explicit refund indicator but merchant is unknown -> must review to assign correct expense offset
-            return CategorizedTransaction(
-                row_number=tx.row_number,
-                id=tx.id,
-                date=tx.date,
-                description=tx.description,
-                amount=amount,
-                currency=tx.currency,
-                debit=tx.debit,
-                credit=tx.credit,
-                transaction_id=tx.transaction_id,
-                type=tx.type,
                 category=CATEGORY_NEEDS_REVIEW,
-                is_refund=True,
+                is_refund=False,
                 is_transfer=False,
-                confidence=0.45,
-                reason="Explicit refund indicator detected but original expense category is unknown",
+                confidence=0.35,
+                reason=f"Incoming credit from vendor '{matched_kw}' without explicit refund or income indicators; requires manual verification",
                 needs_review=True,
             )
 
-    # -----------------------------------------------------------------------
-    # Stage 4: Unverified Deposits / Inflows (Money in not matching known rules)
-    # -----------------------------------------------------------------------
-    if tx_type == "credit":
+        # 1e. Unverified Credit Deposit (Safety Fallback)
         return CategorizedTransaction(
             row_number=tx.row_number,
             id=tx.id,
@@ -196,10 +222,40 @@ def categorize_transaction(tx: Union[ParsedTransaction, Transaction]) -> Categor
             needs_review=True,
         )
 
-    # -----------------------------------------------------------------------
-    # Stage 5: Standard Debit Expenses (Money out)
-    # -----------------------------------------------------------------------
+    # =======================================================================
+    # OUTFLOW HANDLING (Debits / Money Leaving Account)
+    # =======================================================================
+
+    # 2a. Inter-Account Transfers & Credit Card Payoffs
+    # Checked only if no business merchant matched to avoid false positives on autopay subscriptions
+    if transfer_kw and not matched_cat:
+        return CategorizedTransaction(
+            row_number=tx.row_number,
+            id=tx.id,
+            date=tx.date,
+            description=tx.description,
+            amount=amount,
+            currency=tx.currency,
+            debit=tx.debit,
+            credit=tx.credit,
+            transaction_id=tx.transaction_id,
+            type=tx.type,
+            category=CATEGORY_TRANSFER,
+            is_refund=False,
+            is_transfer=True,
+            confidence=0.98,
+            reason=f"Matched transfer pattern '{transfer_kw}' (inter-account or debt payment)",
+            needs_review=False,
+        )
+
+    # 2b. Known Merchant Business Expenses (Money Out)
+    # Rule: Debits containing 'refund' (e.g. refund processing fee) are fees, NOT incoming refunds.
     if matched_cat:
+        reason_str = (
+            f"Debit fee/charge associated with refund/return for {matched_cat} (merchant '{matched_kw}')"
+            if refund_kw
+            else f"Matched merchant '{matched_kw}' for category {matched_cat}"
+        )
         return CategorizedTransaction(
             row_number=tx.row_number,
             id=tx.id,
@@ -215,13 +271,32 @@ def categorize_transaction(tx: Union[ParsedTransaction, Transaction]) -> Categor
             is_refund=False,
             is_transfer=False,
             confidence=0.90,
-            reason=f"Matched merchant '{matched_kw}' for category {matched_cat}",
+            reason=reason_str,
             needs_review=False,
         )
 
-    # -----------------------------------------------------------------------
-    # Stage 6: Safety Fallback - Unknown Merchant / Ambiguous Row
-    # -----------------------------------------------------------------------
+    # 2c. Debit mentioning refund/return but unknown merchant (e.g. 'RETURN RESTOCKING FEE')
+    if refund_kw:
+        return CategorizedTransaction(
+            row_number=tx.row_number,
+            id=tx.id,
+            date=tx.date,
+            description=tx.description,
+            amount=amount,
+            currency=tx.currency,
+            debit=tx.debit,
+            credit=tx.credit,
+            transaction_id=tx.transaction_id,
+            type=tx.type,
+            category=CATEGORY_NEEDS_REVIEW,
+            is_refund=False,
+            is_transfer=False,
+            confidence=0.0,
+            reason="Debit transaction mentioning refund/return but merchant is unrecognized; routed to Needs Review",
+            needs_review=True,
+        )
+
+    # 2d. Safety Fallback: Unknown Merchant / Ambiguous Debit
     # Rule: A wrong guess is worse than asking. Ambiguous entries MUST route to Needs Review.
     return CategorizedTransaction(
         row_number=tx.row_number,

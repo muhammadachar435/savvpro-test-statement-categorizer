@@ -146,3 +146,147 @@ def test_export_sample_statement():
     assert export_res.headers["content-type"].startswith("text/csv")
     assert 'filename="categorized_sample_statement.csv"' in export_res.headers["content-disposition"]
     assert "Row Number,Date,Description,Amount" in export_res.text
+
+
+# ===========================================================================
+# Financial Summary Regression Tests (Net Refund Offsets & Unknown Credits)
+# ===========================================================================
+def test_financial_summary_regression_net_refund_and_unknown_credit():
+    """Verify exact accounting:
+    - Software expense: $100.00
+    - Confirmed software refund: $20.00
+    - Expected net software expense: $80.00
+    - Expected income from these: $0.00
+    - Expected transfer spending: $0.00
+    - Unknown $500 incoming credit: remains Needs Review, does NOT count as income or expense.
+    """
+    csv_content = (
+        "Date,Description,Amount\n"
+        "2026-03-01,ADOBE *CREATIVE CLOUD,-100.00\n"
+        "2026-03-05,ADOBE *REFUND PRO-RATA,20.00\n"
+        "2026-03-10,ONLINE TRANSFER TO SAVINGS,-250.00\n"
+        "2026-03-15,MISCELLANEOUS UNKNOWN DEPOSIT REF#9982,500.00\n"
+    )
+    response = client.post(
+        "/api/upload-statement",
+        files={"file": ("accounting_test.csv", io.BytesIO(csv_content.encode("utf-8")), "text/csv")},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    summary = data["summary"]
+
+    # 1. Total income must be 0 (the $500 unknown deposit must NOT count as income)
+    assert summary["total_income"] == "0.00" or summary["total_income"] == 0.0 or str(summary["total_income"]) == "0.00"
+
+    # 2. Net expenses must be $80.00 ($100 Software - $20 Software Refund)
+    assert str(summary["total_expenses"]) == "80.00"
+
+    # 3. Total refunds must be $20.00
+    assert str(summary["total_refunds"]) == "20.00"
+
+    # 4. Total transfers must be $250.00
+    assert str(summary["total_transfers"]) == "250.00"
+
+    # 5. Total needs review count must be 1 (for the unknown $500 deposit)
+    assert summary["total_needs_review_count"] == 1
+
+    # 6. Check category breakdown for Software
+    sw_cat = next(c for c in summary["category_breakdown"] if c["category"] == CATEGORY_SOFTWARE)
+    assert str(sw_cat["total_amount"]) == "80.00"
+    assert str(sw_cat["deductible_estimate"]) == "80.00"
+
+    # 7. Check category breakdown for Needs Review
+    nr_cat = next(c for c in summary["category_breakdown"] if c["category"] == CATEGORY_NEEDS_REVIEW)
+    assert str(nr_cat["total_amount"]) == "500.00"
+    assert str(nr_cat["deductible_estimate"]) == "0.00"
+
+
+# ===========================================================================
+# CSV Formula Injection Defense Test (CWE-1236 / OWASP)
+# ===========================================================================
+def test_export_csv_formula_injection_defense():
+    """Verify that formula triggers (=, +, -, @), including those preceded by whitespace
+    or control characters (tabs, newlines, CRs), are neutralized with a leading single quote,
+    while harmless descriptions remain untouched and in-memory payloads are not mutated.
+    """
+    test_cases = [
+        ("=SUM(A1:A10)", True),
+        ("+123", True),
+        ("-cmd", True),
+        ("@MACRO", True),
+        (" =SUM(A1:A10)", True),
+        ("  @SUM(A1:A2)", True),
+        ("\t=1+1", True),
+        ("\r=1+1", True),
+        ("\n=1+1", True),
+        ("   +cmd", True),
+        ("Ordinary bank transaction", False),
+        ("GITHUB AUTOMATIC PAYMENT", False),
+    ]
+
+    tx_payload = []
+    for idx, (desc, _is_dangerous) in enumerate(test_cases, start=1):
+        tx_payload.append({
+            "row_number": idx,
+            "id": f"tx_{idx}",
+            "date": "2026-03-01",
+            "description": desc,
+            "amount": "-50.00",
+            "currency": "USD",
+            "type": "debit",
+            "category": "Office Supplies & Equipment",
+            "is_refund": False,
+            "is_transfer": False,
+            "confidence": 0.9,
+            "reason": f"Reason for {desc}",
+            "needs_review": False,
+            "manually_edited": False,
+        })
+
+    export_res = client.post(
+        "/api/export-statement",
+        json={"transactions": tx_payload, "filename": "safe_export.csv"},
+    )
+    assert export_res.status_code == 200
+    csv_text = export_res.text
+
+    for idx, (desc, is_dangerous) in enumerate(test_cases):
+        # 1. In-memory description must NOT be modified
+        assert tx_payload[idx]["description"] == desc
+
+        if is_dangerous:
+            # Dangerous values must be prefixed with a single quote in exported CSV
+            expected_in_csv = f"'{desc}"
+            assert expected_in_csv in csv_text, f"Failed to escape dangerous cell: {desc!r}"
+        else:
+            # Harmless descriptions must NOT have a leading quote added
+            assert f"'{desc}" not in csv_text, f"Harmless cell was erroneously quoted: {desc!r}"
+            assert desc in csv_text, f"Harmless cell missing from CSV: {desc!r}"
+
+
+# ===========================================================================
+# Upload Streaming Limits and Header-Only Rejection
+# ===========================================================================
+def test_upload_header_only_file_rejected():
+    """Header-only statement with zero transactions returns HTTP 400."""
+    csv_content = b"Date,Description,Amount\n"
+    response = client.post(
+        "/api/upload-statement",
+        files={"file": ("headers_only.csv", io.BytesIO(csv_content), "text/csv")},
+    )
+    assert response.status_code == 400
+    assert "Unable to process statement" in response.json()["detail"]
+
+
+def test_upload_streaming_size_limit_rejected():
+    """Uploading a file exceeding MAX_UPLOAD_SIZE_BYTES is rejected with 413."""
+    # Create a dummy large stream > 5MB (250_000 lines * 23 bytes = ~5.75 MB)
+    large_payload = b"Date,Description,Amount\n" + b"2026-03-01,TEST,-10.00\n" * 250_000
+    assert len(large_payload) > 5 * 1024 * 1024
+
+    response = client.post(
+        "/api/upload-statement",
+        files={"file": ("too_large.csv", io.BytesIO(large_payload), "text/csv")},
+    )
+    assert response.status_code == 413
+    assert "exceeds maximum upload size" in response.json()["detail"]

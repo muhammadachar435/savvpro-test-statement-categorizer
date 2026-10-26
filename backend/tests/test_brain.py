@@ -336,3 +336,93 @@ def test_float_input_does_not_corrupt_decimal():
     )
     assert str(tx.amount) == "54.99", f"got {tx.amount!r}"
 
+
+# ===========================================================================
+# 18. Debit Containing 'Refund' Word Must NOT Be an Incoming Refund
+# ===========================================================================
+def test_debit_with_refund_word_not_marked_as_incoming_refund():
+    """A debit containing 'REFUND' is money leaving (e.g. fee/charge), NOT money returned."""
+    # Debit for airline ticket refund fee
+    tx_fee = _make_tx("DELTA AIR REFUND PROCESSING FEE", "-15.00", "debit")
+    res_fee = categorize_transaction(tx_fee)
+    assert res_fee.category == CATEGORY_TRAVEL
+    assert res_fee.is_refund is False  # Outflow cannot be an incoming refund
+    assert res_fee.needs_review is False
+
+    # Unrecognized debit mentioning refund
+    tx_unknown_fee = _make_tx("RETURN ITEM RESTOCKING FEE 541", "-8.50", "debit")
+    res_unknown = categorize_transaction(tx_unknown_fee)
+    assert res_unknown.category == CATEGORY_NEEDS_REVIEW
+    assert res_unknown.is_refund is False
+    assert res_unknown.needs_review is True
+
+
+# ===========================================================================
+# 19. Credit from Known Merchant Without Refund Keywords Routes to Needs Review
+# ===========================================================================
+def test_credit_from_merchant_without_refund_keyword_routes_to_needs_review():
+    """Do not assume every incoming credit from a known merchant is a refund."""
+    tx_deposit = _make_tx("ADOBE SYSTEMS INC PAYOUT", "500.00", "credit")
+    res = categorize_transaction(tx_deposit)
+    assert res.category == CATEGORY_NEEDS_REVIEW
+    assert res.is_refund is False
+    assert res.needs_review is True
+    assert "without explicit refund" in res.reason.lower()
+
+
+# ===========================================================================
+# 20. Transfer False Positives Do NOT Hijack Legitimate Business Expenses
+# ===========================================================================
+def test_transfer_false_positives_do_not_hijack_business_expenses():
+    """Autopay and automatic payment terms on software subscriptions must stay business expenses."""
+    tx_sub = _make_tx("GITHUB AUTOMATIC PAYMENT", "-21.00", "debit")
+    res_sub = categorize_transaction(tx_sub)
+    assert res_sub.category == CATEGORY_SOFTWARE
+    assert res_sub.is_transfer is False
+
+    tx_ride = _make_tx("UBER AUTOPAY BILLING", "-34.50", "debit")
+    res_ride = categorize_transaction(tx_ride)
+    assert res_ride.category == CATEGORY_TRAVEL
+    assert res_ride.is_transfer is False
+
+
+# ===========================================================================
+# 21. Explicit Verification of All Spec-Required Categories
+# ===========================================================================
+def test_all_required_spec_categories():
+    """Verify each category specified in TASK.md maps to its canonical domain category."""
+    test_cases = [
+        ("ADOBE CREATIVE CLOUD", "-54.99", "debit", CATEGORY_SOFTWARE),
+        ("AWS HOSTING", "-89.00", "debit", CATEGORY_HOSTING),
+        ("UBER *TRIP", "-22.50", "debit", CATEGORY_TRAVEL),
+        ("OFFICE DEPOT #4412", "-45.00", "debit", CATEGORY_EQUIPMENT),
+        ("STARBUCKS STORE #1029", "-6.50", "debit", CATEGORY_MEALS),
+        ("STRIPE PAYOUT *INVOICE #104", "1500.00", "credit", CATEGORY_INCOME),
+        ("TRANSFER TO SAVINGS 4492", "-500.00", "debit", CATEGORY_TRANSFER),
+        ("JOES CAFE 9921", "-18.75", "debit", CATEGORY_NEEDS_REVIEW),
+    ]
+    for desc, amt, tx_type, expected_cat in test_cases:
+        tx = _make_tx(desc, amt, tx_type)
+        res = categorize_transaction(tx)
+        assert res.category == expected_cat, f"Mismatch for '{desc}': expected {expected_cat}, got {res.category}"
+
+
+# ===========================================================================
+# 22. Confidence Bounds and Reason Explanations
+# ===========================================================================
+def test_confidence_bounds_and_reason_strings():
+    """Every transaction must have 0.0 <= confidence <= 1.0 and a non-empty explanation."""
+    samples = [
+        _make_tx("ADOBE CREATIVE CLOUD", "-54.99", "debit"),
+        _make_tx("STRIPE PAYOUT", "1000.00", "credit"),
+        _make_tx("TRANSFER TO SAVINGS", "-500.00", "debit"),
+        _make_tx("ADOBE REFUND", "27.50", "credit"),
+        _make_tx("PRO-RATA REFUND", "10.00", "credit"),
+        _make_tx("UNKNOWN MYSTERY MERCH 123", "-40.00", "debit"),
+        _make_tx("UNEXPECTED WIRE DEPOSIT", "300.00", "credit"),
+    ]
+    for tx in samples:
+        res = categorize_transaction(tx)
+        assert 0.0 <= res.confidence <= 1.0, f"Confidence out of bounds: {res.confidence}"
+        assert res.reason and len(res.reason.strip()) > 5, f"Missing or trivial reason for {tx.description}"
+

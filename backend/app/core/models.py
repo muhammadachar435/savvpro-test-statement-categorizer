@@ -176,6 +176,7 @@ class StatementResponse(BaseModel):
     total_rows: int
     transactions: List[CategorizedTransaction]
     summary: StatementSummary
+    errors: List[ParseError] = Field(default_factory=list, description="Row-level parsing errors encountered")
 
 
 class ReviewUpdateRequest(BaseModel):

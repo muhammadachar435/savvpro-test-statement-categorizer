@@ -17,6 +17,11 @@ from app.core.config import (
 
 # ---------------------------------------------------------------------------
 # Inter-account balance transfers & credit card payments (Non-deductible)
+#
+# NOTE: Broad keywords like bare "AUTOPAY" or "AUTOMATIC PAYMENT" are avoided
+# to prevent false positive hijacking of legitimate business subscriptions
+# (e.g. "GITHUB AUTOMATIC PAYMENT", "UBER AUTOPAY BILLING").
+# Patterns require explicit inter-account or credit card debt payoff context.
 # ---------------------------------------------------------------------------
 TRANSFER_PATTERNS: List[str] = [
     r"\bTRANSFER TO SAVINGS\b",
@@ -27,16 +32,21 @@ TRANSFER_PATTERNS: List[str] = [
     r"\bONLINE TRANSFER FROM\b",
     r"\bONLINE TRANSFER\b",
     r"\bINTERNAL TRANSFER\b",
-    r"\bAUTOPAY\b",
+    r"\bINTERNAL XFER\b",
+    r"\b(?:AUTOMATIC PAYMENT|AUTOPAY)\s*-\s*THANK YOU\b",
     r"\bPAYMENT THANK YOU\b",
-    r"\bAUTOMATIC PAYMENT\b",
+    r"\bPAYMENT - THANK YOU\b",
     r"\bCREDIT CARD PAYMENT\b",
-    r"\bCHASE CARD\b",
+    r"\bCREDIT CARD AUTOPAY\b",
+    r"\bCREDIT CARD PAYOFF\b",
+    r"\bCHASE CARD AUTOPAY\b",
+    r"\bCHASE CARD EPAYMENT\b",
     r"\bAMEX EPAYMENT\b",
     r"\bCAPITAL ONE PMT\b",
     r"\bCITI CARD PAYMENT\b",
     r"\bDISCOVER E-PAYMENT\b",
-    r"\bINTERNAL XFER\b",
+    r"\bAUTOPAY (?:PAYMENT|AMEX|CHASE|CITI|DISCOVER|CAPITAL ONE|CARD|EPAYMENT)\b",
+    r"\bAUTOMATIC PAYMENT - THANK YOU CHASE CARD\b",
 ]
 
 # ---------------------------------------------------------------------------

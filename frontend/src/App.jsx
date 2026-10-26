@@ -1,122 +1,226 @@
-import { useState } from 'react'
-import heroImg from './assets/hero.png'
-import reactLogo from './assets/react.svg'
-import viteLogo from './assets/vite.svg'
-import './App.css'
+import { useCallback, useEffect, useState } from 'react';
+import { BrowserRouter, Routes, Route } from 'react-router-dom';
+import Header from './components/Header';
+import AlertBanner from './components/AlertBanner';
+import StatementUpload from './components/StatementUpload';
+import SummaryCards from './components/SummaryCards';
+import CategoryBreakdown from './components/CategoryBreakdown';
+import TransactionTable from './components/TransactionTable';
+import ExportToolbar from './components/ExportToolbar';
+import ScheduleC from './pages/ScheduleC';
+import Settings from './pages/Settings';
+import NotFound from './pages/NotFound';
+import {
+  exportStatement,
+  getCategories,
+  getSampleStatement,
+  reviewTransaction,
+  uploadStatement,
+} from './services/api';
+import './App.css';
 
-function App() {
-  const [count, setCount] = useState(0)
+export default function App() {
+  const [categories, setCategories] = useState([]);
+  const [statement, setStatement] = useState(null);
+  const [isLoading, setIsLoading] = useState(false);
+  const [updatingTxId, setUpdatingTxId] = useState(null);
+  const [isExporting, setIsExporting] = useState(false);
+  const [error, setError] = useState(null);
+  const [successMessage, setSuccessMessage] = useState(null);
+  const [parseErrors, setParseErrors] = useState([]);
+
+  // Fetch standard domain categories on component mount
+  useEffect(() => {
+    let isMounted = true;
+    getCategories()
+      .then((data) => {
+        if (isMounted && data.categories) {
+          setCategories(data.categories);
+        }
+      })
+      .catch((err) => {
+        if (isMounted) {
+          setError(`Unable to connect to backend service: ${err.message}`);
+        }
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  // Handle uploading CSV bank statement
+  const handleFileUpload = useCallback(async (file) => {
+    setIsLoading(true);
+    setError(null);
+    setSuccessMessage(null);
+    setParseErrors([]);
+
+    try {
+      const data = await uploadStatement(file);
+      setStatement(data);
+      if (data.errors && data.errors.length > 0) {
+        setParseErrors(data.errors);
+      }
+      setSuccessMessage(`Successfully processed statement "${data.filename}" (${data.total_rows} transactions).`);
+    } catch (err) {
+      setError(err.message || 'Failed to upload statement.');
+    } finally {
+      setIsLoading(false);
+    }
+  }, []);
+
+  // Handle loading synthetic sample statement
+  const handleLoadSample = useCallback(async () => {
+    setIsLoading(true);
+    setError(null);
+    setSuccessMessage(null);
+    setParseErrors([]);
+
+    try {
+      const data = await getSampleStatement();
+      setStatement(data);
+      if (data.errors && data.errors.length > 0) {
+        setParseErrors(data.errors);
+      }
+      setSuccessMessage('Loaded synthetic Freelance statement (18 transactions). Explore metrics and resolve "Needs Review" items below.');
+    } catch (err) {
+      setError(err.message || 'Failed to load sample statement.');
+    } finally {
+      setIsLoading(false);
+    }
+  }, []);
+
+  // Handle manual review and category reclassification
+  const handleCategoryChange = useCallback(async (transactionId, newCategory) => {
+    if (!statement || updatingTxId) return;
+
+    const targetTx = statement.transactions.find((t) => t.id === transactionId);
+    if (!targetTx || targetTx.category === newCategory) return;
+
+    setUpdatingTxId(transactionId);
+    setError(null);
+
+    try {
+      const res = await reviewTransaction(transactionId, newCategory, statement.transactions);
+      setStatement((prev) => ({
+        ...prev,
+        transactions: res.transactions,
+        summary: res.summary,
+      }));
+      setSuccessMessage(`Updated "${targetTx.description}" to ${newCategory}. Summary totals recalculated live.`);
+    } catch (err) {
+      setError(`Failed to update category: ${err.message}`);
+    } finally {
+      setUpdatingTxId(null);
+    }
+  }, [statement, updatingTxId]);
+
+  // Handle exporting finalized reviewed statement to CSV
+  const handleExport = useCallback(async (filename) => {
+    if (!statement || !statement.transactions || statement.transactions.length === 0) {
+      setError('No transactions available to export.');
+      return;
+    }
+
+    setIsExporting(true);
+    setError(null);
+
+    try {
+      await exportStatement(statement.transactions, filename);
+      setSuccessMessage(`Successfully exported statement to ${filename}.`);
+    } catch (err) {
+      setError(`Export failed: ${err.message}`);
+    } finally {
+      setIsExporting(false);
+    }
+  }, [statement]);
+
+  // Handle resetting back to initial upload state
+  const handleReset = useCallback(() => {
+    setStatement(null);
+    setError(null);
+    setSuccessMessage(null);
+    setParseErrors([]);
+  }, []);
 
   return (
-    <>
-      <section id="center">
-        <div className="hero">
-          <img src={heroImg} className="base" width="170" height="179" alt="" />
-          <img src={reactLogo} className="framework" alt="React logo" />
-          <img src={viteLogo} className="vite" alt="Vite logo" />
-        </div>
-        <div>
-          <h1>Get started</h1>
-          <p>
-            Edit <code>src/App.jsx</code> and save to test <code>HMR</code>
-          </p>
-        </div>
-        <button
-          type="button"
-          className="counter"
-          onClick={() => setCount((count) => count + 1)}
-        >
-          Count is {count}
-        </button>
-      </section>
+    <BrowserRouter>
+      <div className="app-container">
+        <Header />
 
-      <div className="ticks"></div>
+        <main className="main-content">
+          <AlertBanner
+            error={error}
+            parseErrors={parseErrors}
+            successMessage={successMessage}
+            onDismiss={() => {
+              setError(null);
+              setSuccessMessage(null);
+            }}
+          />
 
-      <section id="next-steps">
-        <div id="docs">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#documentation-icon"></use>
-          </svg>
-          <h2>Documentation</h2>
-          <p>Your questions, answered</p>
-          <ul>
-            <li>
-              <a href="https://vite.dev/" target="_blank">
-                <img className="logo" src={viteLogo} alt="" />
-                Explore Vite
-              </a>
-            </li>
-            <li>
-              <a href="https://react.dev/" target="_blank">
-                <img className="button-icon" src={reactLogo} alt="" />
-                Learn more
-              </a>
-            </li>
-          </ul>
-        </div>
-        <div id="social">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#social-icon"></use>
-          </svg>
-          <h2>Connect with us</h2>
-          <p>Join the Vite community</p>
-          <ul>
-            <li>
-              <a href="https://github.com/vitejs/vite" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#github-icon"></use>
-                </svg>
-                GitHub
-              </a>
-            </li>
-            <li>
-              <a href="https://chat.vite.dev/" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#discord-icon"></use>
-                </svg>
-                Discord
-              </a>
-            </li>
-            <li>
-              <a href="https://x.com/vite_js" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#x-icon"></use>
-                </svg>
-                X.com
-              </a>
-            </li>
-            <li>
-              <a href="https://bsky.app/profile/vite.dev" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#bluesky-icon"></use>
-                </svg>
-                Bluesky
-              </a>
-            </li>
-          </ul>
-        </div>
-      </section>
+          <Routes>
+            <Route
+              path="/"
+              element={
+                !statement ? (
+                  <StatementUpload
+                    onFileUpload={handleFileUpload}
+                    onLoadSample={handleLoadSample}
+                    isLoading={isLoading}
+                  />
+                ) : (
+                  <div className="statement-dashboard">
+                    <ExportToolbar
+                      filename={statement.filename}
+                      totalRows={statement.total_rows}
+                      needsReviewCount={statement.summary?.total_needs_review_count || 0}
+                      onExport={handleExport}
+                      onReset={handleReset}
+                      isExporting={isExporting}
+                    />
 
-      <div className="ticks"></div>
-      <section id="spacer"></section>
-    </>
-  )
+                    <SummaryCards summary={statement.summary} />
+
+                    <CategoryBreakdown breakdown={statement.summary?.category_breakdown} />
+
+                    <TransactionTable
+                      transactions={statement.transactions}
+                      categories={categories}
+                      onCategoryChange={handleCategoryChange}
+                      updatingTxId={updatingTxId}
+                    />
+                  </div>
+                )
+              }
+            />
+            <Route
+              path="/schedule-c"
+              element={<ScheduleC statement={statement} />}
+            />
+            <Route
+              path="/settings"
+              element={<Settings />}
+            />
+            <Route
+              path="*"
+              element={<NotFound />}
+            />
+          </Routes>
+        </main>
+
+        <footer className="app-footer">
+          <div className="footer-inner">
+            <span className="footer-brand">SAVV Pro Solutions</span>
+            <div className="footer-meta">
+              <span>Freelancer Schedule C Edition</span>
+              <span>Deterministic Zero-LLM Architecture</span>
+              <span>All processing is local</span>
+            </div>
+          </div>
+        </footer>
+      </div>
+    </BrowserRouter>
+  );
 }
-
-export default App
