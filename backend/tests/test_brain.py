@@ -305,10 +305,10 @@ def test_decimal_preservation():
 
 
 # ===========================================================================
-# 16. Spec-Exact Test: ADOBE REFUND from TASK.md
+# 16. Spec-Exact Test from TASK.md
 # ===========================================================================
 def test_adobe_refund_exact_from_spec():
-    """Mirrors TASK.md example: 'ADOBE REFUND' -> Software, is_refund=True."""
+    """Mirrors TASK.md example: 'ADOBE REFUND' → Software, is_refund=True."""
     tx = Transaction(
         id="t_spec",
         date="2026-03-10",
@@ -324,7 +324,7 @@ def test_adobe_refund_exact_from_spec():
 
 
 # ===========================================================================
-# 17. Float-Safety Test: float input does not corrupt Decimal
+# 17. Float-Safety Test
 # ===========================================================================
 def test_float_input_does_not_corrupt_decimal():
     tx = Transaction(

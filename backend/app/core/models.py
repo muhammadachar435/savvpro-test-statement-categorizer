@@ -16,7 +16,7 @@ within these models.
 """
 import datetime
 from decimal import Decimal
-from typing import List, Optional
+from typing import List, Optional, Union
 from pydantic import BaseModel, Field, field_validator
 
 
@@ -63,33 +63,42 @@ class ParsedTransaction(BaseModel):
 
     @field_validator("date", mode="before")
     @classmethod
-    def coerce_date(cls, v):
-        """Coerce string inputs to datetime.date."""
-        if v is None or isinstance(v, datetime.date):
+    def coerce_date(cls, v: Union[datetime.date, str, None]) -> Optional[datetime.date]:
+        """Convert date strings (ISO or common formats) to datetime.date."""
+        if v is None or v == "":
+            return None
+        if isinstance(v, datetime.date):
             return v
         if isinstance(v, str):
             cleaned = v.strip()
-            if not cleaned:
-                return None
+            for fmt in (
+                "%Y-%m-%d",
+                "%Y/%m/%d",
+                "%m/%d/%Y",
+                "%m-%d-%Y",
+                "%d/%m/%Y",
+                "%d-%m-%Y",
+                "%Y%m%d",
+                "%b %d, %Y",
+                "%B %d, %Y",
+            ):
+                try:
+                    return datetime.datetime.strptime(cleaned, fmt).date()
+                except ValueError:
+                    continue
             try:
                 return datetime.date.fromisoformat(cleaned)
             except ValueError:
-                from app.core.config import SUPPORTED_DATE_FORMATS
-                for fmt in SUPPORTED_DATE_FORMATS:
-                    try:
-                        return datetime.datetime.strptime(cleaned, fmt).date()
-                    except ValueError:
-                        continue
-                raise ValueError(f"Invalid date format: '{v}'")
-        raise ValueError(f"Unsupported date type: {type(v)}")
+                raise ValueError(f"Unable to parse date string: {v!r}")
+        return v
 
     @field_validator("amount", mode="before")
     @classmethod
-    def coerce_amount_from_float_or_str(cls, v):
-        """Prevent binary floating-point precision corruption when float is provided."""
+    def coerce_amount_to_decimal(cls, v: Union[Decimal, float, int, str]) -> Decimal:
+        """Coerce float/int/str input to Decimal without binary floating-point corruption."""
         if isinstance(v, float):
             return Decimal(str(v))
-        if isinstance(v, (str, int)):
+        if isinstance(v, (int, str)):
             return Decimal(str(v))
         return v
 
@@ -128,7 +137,7 @@ Transaction = ParsedTransaction
 
 
 # ---------------------------------------------------------------------------
-# Models for Module 3 (Categorization Brain) and Module 4 (API Routes)
+# Forward models for Module 3 (Categorization Brain) and Module 4 (API Routes)
 # ---------------------------------------------------------------------------
 
 class CategorizedTransaction(ParsedTransaction):
@@ -143,7 +152,7 @@ class CategorizedTransaction(ParsedTransaction):
 
 
 class CategorySummary(BaseModel):
-    """Aggregated tax category totals using exact Decimal precision."""
+    """Aggregated tax category totals using exact Decimal amounts."""
     category: str
     total_amount: Decimal
     count: int
@@ -152,7 +161,7 @@ class CategorySummary(BaseModel):
 
 
 class StatementSummary(BaseModel):
-    """High-level summary of financial totals and review counts using Decimal."""
+    """High-level summary of financial totals and review counts using exact Decimal amounts."""
     total_income: Decimal
     total_expenses: Decimal
     total_refunds: Decimal

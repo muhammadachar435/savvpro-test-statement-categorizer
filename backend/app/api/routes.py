@@ -25,7 +25,6 @@ router = APIRouter(prefix="/api", tags=["statements"])
 def build_summary(transactions: List[CategorizedTransaction]) -> StatementSummary:
     """Compute financial and tax summary totals from categorized transactions using Decimal."""
     from decimal import Decimal
-
     total_income = Decimal("0.00")
     total_expenses = Decimal("0.00")
     total_refunds = Decimal("0.00")
@@ -55,11 +54,11 @@ def build_summary(transactions: List[CategorizedTransaction]) -> StatementSummar
     breakdown: List[CategorySummary] = []
     for cat in ALL_CATEGORIES:
         count = cat_counts.get(cat, 0)
-        tot = cat_totals.get(cat, Decimal("0.00")).quantize(Decimal("0.01"))
+        tot = round(cat_totals.get(cat, Decimal("0.00")), 2)
         rule = TAX_RULES.get(cat, {"deductible": "0%", "type": "expense"})
         pct_str = rule["deductible"]
-        pct_val = Decimal(pct_str.replace("%", "")) / Decimal("100")
-        deductible_est = (tot * pct_val).quantize(Decimal("0.01")) if rule["type"] == "expense" else Decimal("0.00")
+        pct_dec = Decimal(pct_str.replace("%", "")) / Decimal("100")
+        deductible_est = round(tot * pct_dec, 2) if rule["type"] == "expense" else Decimal("0.00")
 
         breakdown.append(
             CategorySummary(
@@ -72,10 +71,10 @@ def build_summary(transactions: List[CategorizedTransaction]) -> StatementSummar
         )
 
     return StatementSummary(
-        total_income=total_income.quantize(Decimal("0.01")),
-        total_expenses=total_expenses.quantize(Decimal("0.01")),
-        total_refunds=total_refunds.quantize(Decimal("0.01")),
-        total_transfers=total_transfers.quantize(Decimal("0.01")),
+        total_income=round(total_income, 2),
+        total_expenses=round(total_expenses, 2),
+        total_refunds=round(total_refunds, 2),
+        total_transfers=round(total_transfers, 2),
         total_needs_review_count=needs_review_count,
         category_breakdown=breakdown,
     )
