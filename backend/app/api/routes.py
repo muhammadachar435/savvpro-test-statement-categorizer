@@ -1,30 +1,40 @@
-"""API route endpoints for statement upload, sample loading, and review resolution."""
+"""API route endpoints for statement upload, sample loading, review resolution, and export."""
+import csv
+import io
 import os
-from typing import List, Dict
-from fastapi import APIRouter, UploadFile, File, HTTPException
+from decimal import Decimal
+from typing import Dict, List, Optional
+
+from fastapi import APIRouter, File, HTTPException, Response, UploadFile
+from pydantic import BaseModel
+
 from app.core.config import (
     ALL_CATEGORIES,
-    TAX_RULES,
     CATEGORY_INCOME,
-    CATEGORY_TRANSFER,
     CATEGORY_NEEDS_REVIEW,
+    TAX_RULES,
 )
 from app.core.models import (
     CategorizedTransaction,
     CategorySummary,
-    StatementSummary,
-    StatementResponse,
     ReviewUpdateRequest,
+    StatementResponse,
+    StatementSummary,
 )
 from app.parser.csv_parser import parse_csv_statement
-from app.brain.engine import categorize_transaction
+from app.brain.engine import categorize_statement, categorize_transaction
 
 router = APIRouter(prefix="/api", tags=["statements"])
 
 
+class ExportStatementRequest(BaseModel):
+    """Payload for CSV statement export."""
+    transactions: List[CategorizedTransaction]
+    filename: Optional[str] = "categorized_statement.csv"
+
+
 def build_summary(transactions: List[CategorizedTransaction]) -> StatementSummary:
     """Compute financial and tax summary totals from categorized transactions using Decimal."""
-    from decimal import Decimal
     total_income = Decimal("0.00")
     total_expenses = Decimal("0.00")
     total_refunds = Decimal("0.00")
@@ -80,9 +90,47 @@ def build_summary(transactions: List[CategorizedTransaction]) -> StatementSummar
     )
 
 
+def generate_statement_csv(transactions: List[CategorizedTransaction]) -> str:
+    """Generate standardized RFC 4180 CSV content from categorized transactions."""
+    output = io.StringIO()
+    writer = csv.writer(output, quoting=csv.QUOTE_MINIMAL)
+    writer.writerow([
+        "Row Number",
+        "Date",
+        "Description",
+        "Amount",
+        "Currency",
+        "Type",
+        "Category",
+        "Is Refund",
+        "Is Transfer",
+        "Confidence",
+        "Needs Review",
+        "Manually Edited",
+        "Reason",
+    ])
+    for tx in transactions:
+        writer.writerow([
+            tx.row_number,
+            tx.date.isoformat() if tx.date else "",
+            tx.description,
+            str(tx.amount),
+            tx.currency,
+            tx.type,
+            tx.category,
+            "Yes" if tx.is_refund else "No",
+            "Yes" if tx.is_transfer else "No",
+            f"{tx.confidence:.2f}",
+            "Yes" if tx.needs_review else "No",
+            "Yes" if tx.manually_edited else "No",
+            tx.reason,
+        ])
+    return output.getvalue()
+
+
 @router.get("/categories")
 def get_categories():
-    """Retrieve all standard categories and tax rules."""
+    """Retrieve all standard categories and tax rules for the Freelance persona."""
     return {
         "categories": ALL_CATEGORIES,
         "tax_rules": TAX_RULES,
@@ -91,18 +139,21 @@ def get_categories():
 
 @router.post("/upload-statement", response_model=StatementResponse)
 async def upload_statement(file: UploadFile = File(...)):
-    """Upload and process a statement CSV."""
+    """Upload and process a statement CSV via the parser and deterministic brain."""
     if not file.filename.lower().endswith(".csv"):
         raise HTTPException(status_code=400, detail="Only CSV files are currently supported.")
 
     raw_bytes = await file.read()
-    content = raw_bytes.decode("utf-8", errors="replace")
+    result = parse_csv_statement(raw_bytes, filename=file.filename)
+    if not result.is_acceptable or not result.transactions:
+        err_details = (
+            "; ".join([e.message for e in result.errors])
+            if result.errors
+            else "No valid transactions could be parsed from the file."
+        )
+        raise HTTPException(status_code=400, detail=f"Unable to process statement: {err_details}")
 
-    raw_transactions, parse_errors = parse_csv_statement(content)
-    if not raw_transactions:
-        raise HTTPException(status_code=400, detail="No valid transactions could be parsed from the file.")
-
-    categorized = [categorize_transaction(t) for t in raw_transactions]
+    categorized = categorize_statement(result.transactions)
     summary = build_summary(categorized)
 
     return StatementResponse(
@@ -123,8 +174,11 @@ def load_sample_statement():
     with open(sample_path, "r", encoding="utf-8") as f:
         content = f.read()
 
-    raw_transactions, _ = parse_csv_statement(content)
-    categorized = [categorize_transaction(t) for t in raw_transactions]
+    result = parse_csv_statement(content, filename="sample_statement.csv")
+    if not result.is_acceptable or not result.transactions:
+        raise HTTPException(status_code=500, detail="Failed to parse synthetic sample dataset.")
+
+    categorized = categorize_statement(result.transactions)
     summary = build_summary(categorized)
 
     return StatementResponse(
@@ -138,6 +192,12 @@ def load_sample_statement():
 @router.post("/review-transaction")
 def update_transaction_category(payload: ReviewUpdateRequest, transactions: List[CategorizedTransaction]):
     """Update a specific transaction category and recompute statement summaries."""
+    if payload.new_category not in ALL_CATEGORIES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid category '{payload.new_category}'. Allowed categories: {ALL_CATEGORIES}",
+        )
+
     updated = False
     for tx in transactions:
         if tx.id == payload.transaction_id:
@@ -157,3 +217,31 @@ def update_transaction_category(payload: ReviewUpdateRequest, transactions: List
         "transactions": transactions,
         "summary": new_summary,
     }
+
+
+@router.post("/export-statement")
+def export_statement(request: ExportStatementRequest):
+    """Export current categorized transactions to standard CSV for tax preparation."""
+    if not request.transactions:
+        raise HTTPException(status_code=400, detail="No transactions provided to export.")
+
+    csv_data = generate_statement_csv(request.transactions)
+    fname = request.filename if request.filename.endswith(".csv") else f"{request.filename}.csv"
+
+    return Response(
+        content=csv_data,
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
+
+
+@router.get("/export-sample")
+def export_sample_statement():
+    """Export the processed synthetic sample statement as a downloadable CSV."""
+    sample_response = load_sample_statement()
+    csv_data = generate_statement_csv(sample_response.transactions)
+    return Response(
+        content=csv_data,
+        media_type="text/csv",
+        headers={"Content-Disposition": 'attachment; filename="categorized_sample_statement.csv"'},
+    )
